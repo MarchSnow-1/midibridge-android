@@ -2,7 +2,7 @@
 
 # MIDIBridge Android
 
-Turn your Android phone into a portable MIDI WebSocket server — plug in a USB MIDI keyboard and stream to any DAW over the network in real time.
+Run MIDIBridge Server on your Android device and stream MIDI signals to other devices over the network in real time.
 
 <!-- Badges -->
 
@@ -23,10 +23,10 @@ Turn your Android phone into a portable MIDI WebSocket server — plug in a USB 
 
 Download the APK from [Releases](https://github.com/MarchSnow-1/midibridge-android/releases) and install it on your Android device.
 
-1. Open MIDIBridge on your phone
-2. Plug in a USB MIDI keyboard via OTG adapter
+1. Open MIDIBridge on your device
+2. Connect your MIDI device via OTG or other means
 3. Select your device from the **MIDI Device** dropdown
-4. Tap **Start** — the WebSocket server is now running
+4. Tap **Start** to start the server
 5. Connect from a MIDIBridge Client using the IP shown on screen
 
 On first launch, the default password is **`midiBridge123`**. Change it immediately in Settings.
@@ -39,7 +39,7 @@ All connected clients are kicked after a password change and must reconnect with
 
 ## Configuration
 
-All settings are managed through the in-app GUI — no config file editing needed. Changes take effect after tapping **Save & Restart**.
+All settings are managed through the in-app GUI. Changes take effect after tapping **Save & Restart**.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -60,43 +60,14 @@ Multiple entries separated by commas. Leave empty to allow all.
 
 Enable the **Video Keep-Alive** toggle to simulate media playback via MediaSession. This raises the service's process priority, making Android much less likely to kill it in the background.
 
-## WebSocket Protocol
-
-Fully compatible with MIDIBridge-Server (Go) and MIDIBridge-Client (Go).
-
-### Client → Server
-
-```json
-{"type":"auth","password":"midiBridge123"}
-{"type":"ping"}
-```
-
-### Server → Client
-
-```json
-{"type":"auth_ok"}
-{"type":"auth_fail","reason":"Incorrect password"}
-{"type":"midi","data":{"t":0.05,"m":"kGRAAQ=="}}
-{"type":"kicked","reason":"server_shutdown"}
-{"type":"pong"}
-```
-
-- `t` — delta seconds from the previous MIDI message
-- `m` — raw MIDI bytes as standard Base64 (no line wrapping)
-- Kick reasons: `auth_timeout` / `server_shutdown` / `password_changed`
-- Authentication timeout: 5 seconds
-
 ## Build from Source
 
 ### Requirements
 
 | Dependency | Notes |
 |------------|-------|
-| Android Studio | Hedgehog (2023.1.1) or newer |
-| JDK | 17 (bundled with Android Studio) |
-| Android SDK | API 23–34 (bundled with Android Studio) |
-
-> No Go, gomobile, NDK, or CGo required — this is a pure Kotlin project.
+| JDK | 17 |
+| Android SDK | API 23–34 |
 
 ### Build
 
@@ -119,12 +90,6 @@ gradlew.bat assembleDebug
 
 # Build Debug APK (Linux / macOS)
 ./gradlew assembleDebug
-```
-
-### Install to device
-
-```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ## License
