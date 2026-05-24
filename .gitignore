@@ -1,0 +1,37 @@
+# ─── Gradle ───
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# ─── IDE ───
+.idea/
+*.iml
+*.iws
+*.ipr
+.shelf/
+workspace.xml
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── Android / Local ───
+local.properties
+*.keystore
+*.jks
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ─── Build cache ───
+.cxx/
+*.crc
+lint/intermediates/
+
+# ─── Logs ───
+logs/
+
+# ─── Node ───
+node_modules/
