@@ -1,0 +1,74 @@
+name: Build Dev
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.android
+            ~/.gradle/caches/build-cache-*
+          key: ${{ runner.os }}-android-${{ hashFiles('**/*.gradle.kts', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-android-
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          RAW=$(git describe --tags --always --long 2>/dev/null || echo "")
+          if echo "$RAW" | grep -Eq '^.+-[0-9]+-g[a-f0-9]+$'; then
+            VER=$(echo "$RAW" | sed -E 's/^(.+)-([0-9]+)-(g[a-f0-9]+)$/\1-beta\2-\3/')
+          elif echo "$RAW" | grep -Eq '^[a-f0-9]+$'; then
+            VER="0.0.0-beta0-g${RAW}"
+          else
+            VER="$RAW"
+          fi
+          echo "VERSION=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Computed version: ${VER}"
+
+      - name: Build Debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             dist/MIDIBridge-Android-${{ steps.version.outputs.VERSION }}.apk
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp dist/MIDIBridge-Android-${{ steps.version.outputs.VERSION }}.apk release/
+          cd release && zip -r \
+            ../MIDIBridge-Android-${{ steps.version.outputs.VERSION }}.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MIDIBridge-Android-${{ steps.version.outputs.VERSION }}
+          path: MIDIBridge-Android-${{ steps.version.outputs.VERSION }}.zip
