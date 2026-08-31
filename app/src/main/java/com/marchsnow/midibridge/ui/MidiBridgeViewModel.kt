@@ -143,8 +143,9 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
             return
         }
 
-        // 2. Validate password length
-        if (edit.password.length < Auth.MIN_PASSWORD_LEN) {
+        // 2. Validate password length（仅在用户填写了新密码时才校验/修改）
+        val newPassword = edit.password
+        if (newPassword.isNotEmpty() && newPassword.length < Auth.MIN_PASSWORD_LEN) {
             _uiEvent.value = UiEvent.ValidationError(
                 "password", "Password must be at least ${Auth.MIN_PASSWORD_LEN} characters"
             )
@@ -155,19 +156,19 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
             val configManager = ConfigManager(getApplication())
             val currentConfig = configManager.load()
 
-            // 3. Detect whether the password actually changed
+            // 3. 密码语义：留空 = 不修改密码；非空且与存储哈希不同 = 修改
             val storedHash = currentConfig.auth.passwordHash
-            val passwordChanged = if (storedHash.isEmpty()) {
-                true // No hash stored yet, treat as changed
-            } else {
-                !runCatching {
-                    BCrypt.verifyer()
-                        .verify(edit.password.toCharArray(), storedHash)
-                        .verified
-                }.getOrDefault(false)
-            }
+            val passwordChanged = newPassword.isNotEmpty() && storedHash.isNotEmpty() &&
+                    !runCatching {
+                        BCrypt.verifyer()
+                            .verify(newPassword.toCharArray(), storedHash)
+                            .verified
+                    }.getOrDefault(false)
 
-            if (passwordChanged && svc.isRunning) {
+            // 首次设置密码（尚无存储哈希）也视为修改
+            val firstTimeSet = newPassword.isNotEmpty() && storedHash.isEmpty()
+
+            if ((passwordChanged || firstTimeSet) && svc.isRunning) {
                 svc.wsServer.kickAllClients(KickReason.PASSWORD_CHANGED)
                 Logger.i("ViewModel", "Password changed, all clients kicked")
             }
@@ -175,19 +176,22 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
             // 4. Build new config and persist
             val newConfig = currentConfig.copy(
                 ws = WsConfig(port = port, allowedIPs = edit.allowedIPs.trim()),
-                auth = currentConfig.auth, // Auth.setNewPassword will mutate this
+                auth = currentConfig.auth,
                 logging = LoggingConfig(midiVerbose = edit.midiVerbose)
             )
 
-            // Hash and persist the password (always, in case re-hash is needed)
-            val tempAuth = Auth(newConfig, configManager)
-            tempAuth.setNewPassword(edit.password)
+            // 仅在用户填写了密码时才重新哈希并持久化；
+            // 留空则保留存储的哈希——密码绝不会被静默重置
+            if (newPassword.isNotEmpty()) {
+                val tempAuth = Auth(newConfig, configManager)
+                tempAuth.setNewPassword(newPassword)
+            }
 
             // 5. Restart service (re-loads config from SharedPreferences)
             svc.restartBridge()
 
-            // 6. Reset edit state
-            _configEdit.postValue(edit.copy(hasUnsavedChanges = false))
+            // 6. Reset edit state（保存后清空密码框，防止下次保存意外复用）
+            _configEdit.postValue(edit.copy(password = "", hasUnsavedChanges = false))
             _uiEvent.postValue(UiEvent.ShowToast("Settings saved, server restarted"))
             Logger.i("ViewModel", "Config saved and server restarted (port=$port)")
         }
@@ -232,7 +236,9 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         _configEdit.value = ConfigEditState(
             wsPort            = cfg.ws.port.toString(),
             allowedIPs        = cfg.ws.allowedIPs,
-            password          = ConfigManager.DEFAULT_PASSWORD,
+            // 密码框留空：填入值才视为"修改密码"。旧实现预填默认密码，
+            // 导致用户只改端口保存时把密码静默重置回默认值并踢光客户端
+            password          = "",
             midiVerbose       = cfg.logging.midiVerbose,
             hasUnsavedChanges = false
         )
