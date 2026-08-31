@@ -71,7 +71,10 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
     private val _configEdit = MutableLiveData(ConfigEditState())
     val configEdit: LiveData<ConfigEditState> = _configEdit
 
-    private val _uiEvent    = MutableLiveData<UiEvent>()
+    // One-shot events use SingleLiveEvent: plain LiveData is sticky — a new
+    // observer (e.g. after rotation) would instantly replay the last Toast/
+    // validation error (AND-V3)
+    private val _uiEvent    = SingleLiveEvent<UiEvent>()
     val uiEvent: LiveData<UiEvent> = _uiEvent
 
     private var service: MidiBridgeService? = null
