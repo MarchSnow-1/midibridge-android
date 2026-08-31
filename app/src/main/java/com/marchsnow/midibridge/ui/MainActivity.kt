@@ -1,10 +1,13 @@
 package com.marchsnow.midibridge.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.midi.MidiDeviceInfo
+import android.os.Build
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -12,6 +15,7 @@ import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
@@ -27,11 +31,26 @@ class MainActivity : AppCompatActivity() {
     // Prevent TextWatcher from firing when ViewModel pushes values back to form fields
     private var suppressConfigWatchers = false
 
+    // AND-A1: API 33+ requires a runtime grant for notifications
+    // (the foreground-service status notification included)
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                Toast.makeText(
+                    this,
+                    "Notification permission denied — service status won't be visible",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         viewModel = ViewModelProvider(this)[MidiBridgeViewModel::class.java]
+
+        requestNotificationPermissionIfNeeded()
 
         // Start the foreground service (service auto-starts the bridge)
         ContextCompat.startForegroundService(
@@ -46,6 +65,14 @@ class MainActivity : AppCompatActivity() {
         setupDeviceSpinner()
         setupIpClickCopy()
         observeViewModel()
+    }
+
+    /** Ask for POST_NOTIFICATIONS on API 33+; nothing to do on older versions (AND-A1). */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val permission = Manifest.permission.POST_NOTIFICATIONS
+        if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) return
+        notificationPermissionLauncher.launch(permission)
     }
 
     // ─── Action buttons ───
