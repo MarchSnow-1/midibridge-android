@@ -214,6 +214,10 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
                 // 5. Restart service (re-loads config from SharedPreferences).
                 //    restartBridge 本身异步（Service IO scope），不再阻塞此协程
                 svc.restartBridge()
+
+                // 重启会 close 掉旧 MidiReader 并重建——selectedDevice 指向的
+                // 设备已被释放，置空避免 UI/spinner 显示幽灵选中 (AND-V6/V7)
+                _uiState.postValue(_uiState.value?.copy(selectedDevice = null))
             }
 
             // 6. Reset edit state（保存后清空密码框，防止下次保存意外复用）
@@ -306,7 +310,8 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.postValue(
             UiState(
                 isRunning        = svc.isRunning,
-                wsPort           = if (svc.isRunning) svc.config?.ws?.port ?: 9001 else 9001,
+                // 停止态也显示配置里的实际端口，而非硬编码 9001 (AND-V6/V7)
+                wsPort           = svc.config?.ws?.port ?: 9001,
                 clientCount      = if (svc.isRunning) svc.wsServer?.clientCount() ?: 0 else 0,
                 midiConnected    = svc.midiReader?.isConnected ?: false,
                 clients          = if (svc.isRunning) svc.wsServer?.getClients() ?: emptyList() else emptyList(),

@@ -67,6 +67,14 @@ class MidiBridgeService : Service() {
     /** 串行化 bridge 的启动/停止/重启，防止交错调用产生竞态 */
     private val bridgeMutex = Mutex()
 
+    /**
+     * Per-bridge coroutine scope owning the connectFlow/disconnectFlow
+     * collectors. Cancelled in stopBridgeInternal — otherwise every
+     * start/stop cycle leaks another pair of collectors collecting from
+     * the retired MidiReader's flows (AND-V6/V7).
+     */
+    private var bridgeScope: CoroutineScope? = null
+
     // 模块引用：onCreate 置 null，startBridge 创建，stopBridge 清理。
     // 对外一律通过 null-safe 访问器，杜绝 lateinit 崩溃（AND-V2/S4）
     var midiReader: MidiReader? = null
@@ -177,8 +185,13 @@ class MidiBridgeService : Service() {
 
         ws.start()
 
+        // Own this bridge's event collectors in a dedicated scope so
+        // stopBridgeInternal can cancel them (AND-V6/V7)
+        val collectors = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        bridgeScope = collectors
+
         // Event bus: device connect → log + notification
-        scope.launch {
+        collectors.launch {
             mr.connectFlow.collect { info ->
                 val name = info.properties.getString(MidiDeviceInfo.PROPERTY_NAME) ?: "Unknown"
                 Logger.i(TAG, "MIDI device connected: $name")
@@ -187,7 +200,7 @@ class MidiBridgeService : Service() {
         }
 
         // Event bus: device disconnect → log + notification
-        scope.launch {
+        collectors.launch {
             mr.disconnectFlow.collect {
                 Logger.w(TAG, "MIDI device disconnected")
                 updateNotification("MIDI disconnected | Port ${cfg.ws.port}")
@@ -201,6 +214,9 @@ class MidiBridgeService : Service() {
 
     private fun stopBridgeInternal() {
         if (!isRunning) return
+        // Cancel this bridge's flow collectors first, then tear down modules
+        bridgeScope?.cancel()
+        bridgeScope = null
         midiReader?.release()
         wsServer?.stop()
         midiReader = null
