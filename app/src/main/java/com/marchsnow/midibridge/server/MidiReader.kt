@@ -53,10 +53,13 @@ class MidiReader(private val context: Context) {
      */
     private val parser = MidiParser { warning -> Logger.w("MidiReader", warning) }
 
-    // Buffer 256, DROP_OLDEST = non-blocking send (matches Go select-default pattern)
+    // Buffer 256, DROP_LATEST = non-blocking send. Matches the Go
+    // select-default pattern: when the buffer is full the NEW event is
+    // dropped (send falls through to default) while already-queued events
+    // keep their order — 丢新不丢旧 (AND-新N8).
     private val _midiFlow = MutableSharedFlow<MidiEvent>(
         extraBufferCapacity = 256,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
+        onBufferOverflow = BufferOverflow.DROP_LATEST
     )
     val midiFlow: SharedFlow<MidiEvent> = _midiFlow.asSharedFlow()
 

@@ -46,12 +46,13 @@ data class UiState(
     val keepAliveOn:       Boolean              = false
 )
 
-/** Configuration edit state (user-driven, not yet saved). */
+/** Configuration edit state (user-driven, not yet saved).
+ *  Defaults mirror the persisted config defaults (midiVerbose=false, AND-新N9). */
 data class ConfigEditState(
     val wsPort:            String  = "9001",
     val allowedIPs:        String  = "",
     val password:          String  = "",
-    val midiVerbose:       Boolean = true,
+    val midiVerbose:       Boolean = false,
     val hasUnsavedChanges: Boolean = false
 )
 

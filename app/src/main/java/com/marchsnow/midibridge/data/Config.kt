@@ -36,7 +36,8 @@ data class MidiConfig(
 )
 
 data class LoggingConfig(
-    @SerializedName("midiVerbose") val midiVerbose: Boolean = true
+    // 默认关闭：MIDI 事件日志刷屏且有额外开销；与 Go 版默认一致 (AND-新N9)
+    @SerializedName("midiVerbose") val midiVerbose: Boolean = false
 )
 
 /**
