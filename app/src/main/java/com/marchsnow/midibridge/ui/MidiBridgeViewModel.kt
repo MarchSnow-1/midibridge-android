@@ -23,9 +23,11 @@ import com.marchsnow.midibridge.server.Auth
 import com.marchsnow.midibridge.service.MidiBridgeService
 import com.marchsnow.midibridge.service.VideoKeepAlive
 import com.marchsnow.midibridge.util.Logger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.NetworkInterface
 
 // ─── UI state data classes ───
@@ -44,12 +46,13 @@ data class UiState(
     val keepAliveOn:       Boolean              = false
 )
 
-/** Configuration edit state (user-driven, not yet saved). */
+/** Configuration edit state (user-driven, not yet saved).
+ *  Defaults mirror the persisted config defaults (midiVerbose=false, AND-新N9). */
 data class ConfigEditState(
     val wsPort:            String  = "9001",
     val allowedIPs:        String  = "",
     val password:          String  = "",
-    val midiVerbose:       Boolean = true,
+    val midiVerbose:       Boolean = false,
     val hasUnsavedChanges: Boolean = false
 )
 
@@ -69,10 +72,16 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
     private val _configEdit = MutableLiveData(ConfigEditState())
     val configEdit: LiveData<ConfigEditState> = _configEdit
 
-    private val _uiEvent    = MutableLiveData<UiEvent>()
+    // One-shot events use SingleLiveEvent: plain LiveData is sticky — a new
+    // observer (e.g. after rotation) would instantly replay the last Toast/
+    // validation error (AND-V3)
+    private val _uiEvent    = SingleLiveEvent<UiEvent>()
     val uiEvent: LiveData<UiEvent> = _uiEvent
 
     private var service: MidiBridgeService? = null
+
+    /** Polling loop job — tracked so a stale loop is cancelled on rebind (AND-V4). */
+    private var pollJob: kotlinx.coroutines.Job? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -85,6 +94,10 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
 
         override fun onServiceDisconnected(name: ComponentName) {
             service = null
+            // The old loop would keep running against a dead service reference
+            // and double up with the new one after rebind — cancel it now
+            pollJob?.cancel()
+            pollJob = null
         }
     }
 
@@ -143,8 +156,14 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
             return
         }
 
-        // 2. Validate password length
-        if (edit.password.length < Auth.MIN_PASSWORD_LEN) {
+        // 2. Validate password length（仅在用户填写了新密码时才校验/修改）
+        //    口径与 Go 对齐：Go 用 rune count（unicode 码点数）；
+        //    Kotlin 的 String.length 是 UTF-16 代码单元数，对增补平面
+        //    字符（如 emoji，占 2 个 char）会多计——codePointCount 才是
+        //    码点数，与 len([]rune(s)) 语义一致 (AND-新N11)。
+        val newPassword = edit.password
+        val passwordCodePoints = newPassword.codePointCount(0, newPassword.length)
+        if (newPassword.isNotEmpty() && passwordCodePoints < Auth.MIN_PASSWORD_LEN) {
             _uiEvent.value = UiEvent.ValidationError(
                 "password", "Password must be at least ${Auth.MIN_PASSWORD_LEN} characters"
             )
@@ -152,42 +171,57 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         viewModelScope.launch {
-            val configManager = ConfigManager(getApplication())
-            val currentConfig = configManager.load()
+            // bcrypt 哈希/校验、配置读写与重启都是耗时操作——移出主线程（AND-S3/V5）
+            withContext(Dispatchers.IO) {
+                val configManager = ConfigManager(getApplication())
+                val currentConfig = configManager.load()
 
-            // 3. Detect whether the password actually changed
-            val storedHash = currentConfig.auth.passwordHash
-            val passwordChanged = if (storedHash.isEmpty()) {
-                true // No hash stored yet, treat as changed
-            } else {
-                !runCatching {
-                    BCrypt.verifyer()
-                        .verify(edit.password.toCharArray(), storedHash)
-                        .verified
-                }.getOrDefault(false)
+                // 3. 密码语义：留空 = 不修改密码；非空且与存储哈希不同 = 修改
+                val storedHash = currentConfig.auth.passwordHash
+                val passwordChanged = newPassword.isNotEmpty() && storedHash.isNotEmpty() &&
+                        !runCatching {
+                            BCrypt.verifyer()
+                                .verify(newPassword.toCharArray(), storedHash)
+                                .verified
+                        }.getOrDefault(false)
+
+                // 首次设置密码（尚无存储哈希）也视为修改
+                val firstTimeSet = newPassword.isNotEmpty() && storedHash.isEmpty()
+
+                if ((passwordChanged || firstTimeSet) && svc.isRunning) {
+                    svc.wsServer?.kickAllClients(KickReason.PASSWORD_CHANGED)
+                    Logger.i("ViewModel", "Password changed, all clients kicked")
+                }
+
+                // 4. Build new config and persist
+                val newConfig = currentConfig.copy(
+                    ws = WsConfig(port = port, allowedIPs = edit.allowedIPs.trim()),
+                    auth = currentConfig.auth,
+                    logging = LoggingConfig(midiVerbose = edit.midiVerbose)
+                )
+
+                // 仅在用户填写了密码时才重新哈希并持久化；
+                // 留空则保留存储的哈希——密码绝不会被静默重置。
+                // 无论是否修改密码，ws/logging 的变更都必须落盘
+                //（49036b5 把保存收进密码分支后，仅改端口保存会被静默丢弃）
+                if (newPassword.isNotEmpty()) {
+                    val tempAuth = Auth(newConfig, configManager)
+                    tempAuth.setNewPassword(newPassword)
+                } else {
+                    configManager.save(newConfig)
+                }
+
+                // 5. Restart service (re-loads config from SharedPreferences).
+                //    restartBridge 本身异步（Service IO scope），不再阻塞此协程
+                svc.restartBridge()
+
+                // 重启会 close 掉旧 MidiReader 并重建——selectedDevice 指向的
+                // 设备已被释放，置空避免 UI/spinner 显示幽灵选中 (AND-V6/V7)
+                _uiState.postValue(_uiState.value?.copy(selectedDevice = null))
             }
 
-            if (passwordChanged && svc.isRunning) {
-                svc.wsServer.kickAllClients(KickReason.PASSWORD_CHANGED)
-                Logger.i("ViewModel", "Password changed, all clients kicked")
-            }
-
-            // 4. Build new config and persist
-            val newConfig = currentConfig.copy(
-                ws = WsConfig(port = port, allowedIPs = edit.allowedIPs.trim()),
-                auth = currentConfig.auth, // Auth.setNewPassword will mutate this
-                logging = LoggingConfig(midiVerbose = edit.midiVerbose)
-            )
-
-            // Hash and persist the password (always, in case re-hash is needed)
-            val tempAuth = Auth(newConfig, configManager)
-            tempAuth.setNewPassword(edit.password)
-
-            // 5. Restart service (re-loads config from SharedPreferences)
-            svc.restartBridge()
-
-            // 6. Reset edit state
-            _configEdit.postValue(edit.copy(hasUnsavedChanges = false))
+            // 6. Reset edit state（保存后清空密码框，防止下次保存意外复用）
+            _configEdit.postValue(edit.copy(password = "", hasUnsavedChanges = false))
             _uiEvent.postValue(UiEvent.ShowToast("Settings saved, server restarted"))
             Logger.i("ViewModel", "Config saved and server restarted (port=$port)")
         }
@@ -204,6 +238,12 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectDevice(info: MidiDeviceInfo) {
+        // Spinner re-selection / adapter rebuilds can re-deliver the device
+        // that is already open — re-opening it would close and reopen the
+        // port for nothing (and drop a reconnect-cycle worth of events).
+        // Guard by stable device id, not Spinner timing (AND-A3).
+        val current = _uiState.value?.selectedDevice
+        if (current != null && current.id == info.id) return
         service?.midiReader?.openDevice(info)
         _uiState.value = _uiState.value?.copy(selectedDevice = info)
     }
@@ -217,11 +257,22 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleVideoKeepAlive(enabled: Boolean) {
         if (enabled) {
-            VideoKeepAlive.start(getApplication())
+            // start() can fail on some devices — surface it instead of
+            // silently ignoring the result (AND-V1')
+            val ok = VideoKeepAlive.start(getApplication())
+            if (!ok) {
+                VideoKeepAlive.persistDesired(getApplication(), false)
+                _uiEvent.value = UiEvent.ShowToast("Keep-alive unavailable on this device")
+                _uiState.value = _uiState.value?.copy(keepAliveOn = false)
+                return
+            }
+            VideoKeepAlive.persistDesired(getApplication(), true)
+            _uiState.value = _uiState.value?.copy(keepAliveOn = true)
         } else {
             VideoKeepAlive.stop()
+            VideoKeepAlive.persistDesired(getApplication(), false)
+            _uiState.value = _uiState.value?.copy(keepAliveOn = false)
         }
-        _uiState.value = _uiState.value?.copy(keepAliveOn = enabled)
     }
 
     // ─── Init & polling ───
@@ -232,15 +283,20 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         _configEdit.value = ConfigEditState(
             wsPort            = cfg.ws.port.toString(),
             allowedIPs        = cfg.ws.allowedIPs,
-            password          = ConfigManager.DEFAULT_PASSWORD,
+            // 密码框留空：填入值才视为"修改密码"。旧实现预填默认密码，
+            // 导致用户只改端口保存时把密码静默重置回默认值并踢光客户端
+            password          = "",
             midiVerbose       = cfg.logging.midiVerbose,
             hasUnsavedChanges = false
         )
     }
 
-    /** Poll runtime status every 1.5s (matches old Java Timer logic). */
+    /** Poll runtime status every 1.5s (matches old Java Timer logic).
+     *  The Job is stored: reconnection cancels the previous loop before
+     *  starting a new one, otherwise multiple loops pile up (AND-V4). */
     private fun startPolling() {
-        viewModelScope.launch {
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
             while (isActive) {
                 poll()
                 delay(1500)
@@ -254,10 +310,11 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.postValue(
             UiState(
                 isRunning        = svc.isRunning,
-                wsPort           = if (svc.isRunning) svc.config.ws.port else 9001,
-                clientCount      = if (svc.isRunning) svc.wsServer.clientCount() else 0,
-                midiConnected    = svc.midiReader.isConnected,
-                clients          = if (svc.isRunning) svc.wsServer.getClients() else emptyList(),
+                // 停止态也显示配置里的实际端口，而非硬编码 9001 (AND-V6/V7)
+                wsPort           = svc.config?.ws?.port ?: 9001,
+                clientCount      = if (svc.isRunning) svc.wsServer?.clientCount() ?: 0 else 0,
+                midiConnected    = svc.midiReader?.isConnected ?: false,
+                clients          = if (svc.isRunning) svc.wsServer?.getClients() ?: emptyList() else emptyList(),
                 localIPs         = getLocalIPs(),
                 logs             = Logger.getLogs(),
                 availableDevices = _uiState.value?.availableDevices ?: emptyList(),

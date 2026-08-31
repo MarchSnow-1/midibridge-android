@@ -36,7 +36,8 @@ data class MidiConfig(
 )
 
 data class LoggingConfig(
-    @SerializedName("midiVerbose") val midiVerbose: Boolean = true
+    // 默认关闭：MIDI 事件日志刷屏且有额外开销；与 Go 版默认一致 (AND-新N9)
+    @SerializedName("midiVerbose") val midiVerbose: Boolean = false
 )
 
 /**
@@ -50,14 +51,22 @@ class ConfigManager(context: Context) {
     private val gson  = Gson()
 
     companion object {
-        private const val KEY_CONFIG   = "config_json"
-        const val DEFAULT_PASSWORD     = "midiBridge123"
+        private const val KEY_CONFIG = "config_json"
     }
 
-    /** Load config; return defaults if nothing is saved yet (password hash empty, Auth will seed it). */
+    /** Load config; return defaults if nothing is saved yet.
+     *  解析失败时静默回退默认值的问题已修复：损坏的配置不再被静默丢弃，
+     *  而是记录警告并保留原始 JSON 便于诊断。 */
     fun load(): AppConfig {
         val json = prefs.getString(KEY_CONFIG, null) ?: return AppConfig()
-        return runCatching { gson.fromJson(json, AppConfig::class.java) }.getOrDefault(AppConfig())
+        return runCatching { gson.fromJson(json, AppConfig::class.java) }
+            .onFailure {
+                com.marchsnow.midibridge.util.Logger.e(
+                    "ConfigManager",
+                    "Config parse failed — using defaults. Stored JSON may be corrupted."
+                )
+            }
+            .getOrDefault(AppConfig())
     }
 
     /** Persist config to SharedPreferences. */
