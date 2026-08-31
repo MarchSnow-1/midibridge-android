@@ -79,6 +79,9 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
 
     private var service: MidiBridgeService? = null
 
+    /** Polling loop job — tracked so a stale loop is cancelled on rebind (AND-V4). */
+    private var pollJob: kotlinx.coroutines.Job? = null
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val svc = (binder as MidiBridgeService.LocalBinder).getService()
@@ -90,6 +93,10 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
 
         override fun onServiceDisconnected(name: ComponentName) {
             service = null
+            // The old loop would keep running against a dead service reference
+            // and double up with the new one after rebind — cancel it now
+            pollJob?.cancel()
+            pollJob = null
         }
     }
 
@@ -257,9 +264,12 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         )
     }
 
-    /** Poll runtime status every 1.5s (matches old Java Timer logic). */
+    /** Poll runtime status every 1.5s (matches old Java Timer logic).
+     *  The Job is stored: reconnection cancels the previous loop before
+     *  starting a new one, otherwise multiple loops pile up (AND-V4). */
     private fun startPolling() {
-        viewModelScope.launch {
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
             while (isActive) {
                 poll()
                 delay(1500)
