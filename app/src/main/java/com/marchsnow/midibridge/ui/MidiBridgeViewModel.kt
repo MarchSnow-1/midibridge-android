@@ -169,7 +169,7 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
             val firstTimeSet = newPassword.isNotEmpty() && storedHash.isEmpty()
 
             if ((passwordChanged || firstTimeSet) && svc.isRunning) {
-                svc.wsServer.kickAllClients(KickReason.PASSWORD_CHANGED)
+                svc.wsServer?.kickAllClients(KickReason.PASSWORD_CHANGED)
                 Logger.i("ViewModel", "Password changed, all clients kicked")
             }
 
@@ -260,10 +260,10 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.postValue(
             UiState(
                 isRunning        = svc.isRunning,
-                wsPort           = if (svc.isRunning) svc.config.ws.port else 9001,
-                clientCount      = if (svc.isRunning) svc.wsServer.clientCount() else 0,
-                midiConnected    = svc.midiReader.isConnected,
-                clients          = if (svc.isRunning) svc.wsServer.getClients() else emptyList(),
+                wsPort           = if (svc.isRunning) svc.config?.ws?.port ?: 9001 else 9001,
+                clientCount      = if (svc.isRunning) svc.wsServer?.clientCount() ?: 0 else 0,
+                midiConnected    = svc.midiReader?.isConnected ?: false,
+                clients          = if (svc.isRunning) svc.wsServer?.getClients() ?: emptyList() else emptyList(),
                 localIPs         = getLocalIPs(),
                 logs             = Logger.getLogs(),
                 availableDevices = _uiState.value?.availableDevices ?: emptyList(),

@@ -29,6 +29,14 @@ import kotlinx.coroutines.*
  *
  * WsServer is exposed publicly so ViewModel can call kickAllClients()
  * when the password changes via GUI Save.
+ *
+ * 生命周期契约（Android 12+ 前台服务规则）：
+ *  - onStartCommand 的每条路径（含 null intent 的 START_STICKY 重建、
+ *    ACTION_START 早退分支）都必须及时调用 startForeground，
+ *    否则系统将抛出 ForegroundServiceDidNotStartInTimeException。
+ *  - 模块在 onCreate 中初始化为可空引用，startBridge 中按需创建，
+ *    对外提供 null-safe 访问器——避免 lateinit 在进程重建早期的
+ *    UninitializedPropertyAccessException 崩溃。
  */
 class MidiBridgeService : Service() {
 
@@ -47,20 +55,23 @@ class MidiBridgeService : Service() {
     private val binder = LocalBinder()
     private val scope  = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    lateinit var midiReader: MidiReader
+    // 模块引用：onCreate 置 null，startBridge 创建，stopBridge 清理。
+    // 对外一律通过 null-safe 访问器，杜绝 lateinit 崩溃（AND-V2/S4）
+    var midiReader: MidiReader? = null
         private set
 
-    lateinit var wsServer: WsServer
+    var wsServer: WsServer? = null
         private set
 
-    lateinit var configManager: ConfigManager
+    var configManager: ConfigManager? = null
         private set
 
-    lateinit var config: AppConfig
+    var config: AppConfig? = null
         private set
 
-    private lateinit var auth: Auth
+    private var auth: Auth? = null
 
+    @Volatile
     var isRunning: Boolean = false
         private set
 
@@ -74,7 +85,13 @@ class MidiBridgeService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startBridge()
-            ACTION_STOP  -> stopSelf()
+            ACTION_STOP  -> { stopBridge(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+            // START_STICKY 重建（进程被杀后系统重启）携带 null intent：
+            // 按恢复处理——重新启动桥接业务，绝不能让服务空转
+            null         -> {
+                Logger.i(TAG, "Service restarted by system (sticky) — resuming bridge")
+                startBridge()
+            }
         }
         return START_STICKY
     }
@@ -92,48 +109,64 @@ class MidiBridgeService : Service() {
 
     /** Initialize all modules and start the WebSocket server. */
     fun startBridge() {
+        // 前台化前置：必须在任何可能耗时/抛异常的初始化之前完成，
+        // 保证 startForegroundService() 的 5 秒契约在所有路径上都被满足
+        //（含 ACTION_START 的"已在运行"早退分支——旋转屏幕会重复触发）
+        startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
+
         if (isRunning) {
             Logger.w(TAG, "Server already running")
+            updateNotification("Running on port ${config?.ws?.port ?: 9001}")
             return
         }
 
-        configManager = ConfigManager(applicationContext)
-        config        = configManager.load()
-        auth          = Auth(config, configManager)
-        midiReader    = MidiReader(applicationContext)
-        wsServer      = WsServer(config, auth, midiReader.midiFlow)
+        val cm = ConfigManager(applicationContext)
+        val cfg = cm.load()
+        val a  = Auth(cfg, cm)
+        val mr = MidiReader(applicationContext)
+        val ws = WsServer(cfg, a, mr.midiFlow)
 
-        wsServer.start()
+        configManager = cm
+        config        = cfg
+        auth          = a
+        midiReader    = mr
+        wsServer      = ws
+
+        ws.start()
 
         // Event bus: device connect → log + notification
         scope.launch {
-            midiReader.connectFlow.collect { info ->
+            mr.connectFlow.collect { info ->
                 val name = info.properties.getString(MidiDeviceInfo.PROPERTY_NAME) ?: "Unknown"
                 Logger.i(TAG, "MIDI device connected: $name")
-                updateNotification("MIDI: $name | Port ${config.ws.port}")
+                updateNotification("MIDI: $name | Port ${cfg.ws.port}")
             }
         }
 
         // Event bus: device disconnect → log + notification
         scope.launch {
-            midiReader.disconnectFlow.collect {
+            mr.disconnectFlow.collect {
                 Logger.w(TAG, "MIDI device disconnected")
-                updateNotification("MIDI disconnected | Port ${config.ws.port}")
+                updateNotification("MIDI disconnected | Port ${cfg.ws.port}")
             }
         }
 
         isRunning = true
-        startForeground(NOTIFICATION_ID, buildNotification("Running on port ${config.ws.port}"))
-        Logger.i(TAG, "MIDIBridge started (WS port=${config.ws.port})")
+        updateNotification("Running on port ${cfg.ws.port}")
+        Logger.i(TAG, "MIDIBridge started (WS port=${cfg.ws.port})")
     }
 
     /** Stop all services. Order: MidiReader → WsServer. */
     fun stopBridge() {
         if (!isRunning) return
-        midiReader.release()
-        wsServer.stop()
-        isRunning = false
+        midiReader?.release()
+        wsServer?.stop()
+        midiReader = null
+        wsServer   = null
+        isRunning  = false
         Logger.i(TAG, "MIDIBridge stopped")
+        // 服务保持前台但通知更新为已停止状态（不再显示"Running"误导用户）
+        updateNotification("Stopped")
     }
 
     /** Restart the full stack — called by ViewModel after config save. */
