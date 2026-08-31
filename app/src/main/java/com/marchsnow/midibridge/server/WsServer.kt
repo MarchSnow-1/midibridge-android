@@ -175,13 +175,18 @@ class WsServer(
         }
 
         // Origin 校验：原生客户端（Go CLI / 安卓等）不发送 Origin 头，放行；
-        // 浏览器连接仅在 Host 同源时放行——阻断跨站 WebSocket 劫持（CSWSH）
+        // 浏览器连接仅在 Host 同源时放行——阻断跨站 WebSocket 劫持（CSWSH）。
+        // 注意：Host 头格式为 "hostname[:port]"，须拆出主机名部分再比较
+        //（URI.host 不含端口，直接与含端口的 Host 头比较会恒不等）
         val origin = session.call.request.headers["Origin"]
         if (origin != null) {
-            val host = session.call.request.headers["Host"]
-            val originHost = runCatching { java.net.URI(origin).host }.getOrNull()
-            if (originHost == null || host == null || originHost != host) {
-                Logger.w(TAG, "Rejected cross-origin WebSocket: origin=$origin host=$host")
+            val hostHeader = session.call.request.headers["Host"]
+            val originUri = runCatching { java.net.URI(origin) }.getOrNull()
+            val originHost = originUri?.host
+            // 拆出 Host 头的主机名（去掉端口部分）
+            val hostName = hostHeader?.substringBefore(':')
+            if (originHost == null || hostName == null || originHost != hostName) {
+                Logger.w(TAG, "Rejected cross-origin WebSocket: origin=$origin host=$hostHeader")
                 session.close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Cross-origin not allowed"))
                 return
             }
