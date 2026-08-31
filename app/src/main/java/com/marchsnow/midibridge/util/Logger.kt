@@ -15,7 +15,9 @@ object Logger {
     private const val RING_SIZE = 200
 
     private val ring = Array(RING_SIZE) { "" }
-    private var index = 0
+
+    /** Total lines ever logged. Long so the counter cannot overflow (AND-L1). */
+    private var index = 0L
     private val lock  = Any()
 
     private val timeFmt = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
@@ -39,7 +41,9 @@ object Logger {
         val timestamp = LocalTime.now().format(timeFmt)
         val line = "[$level] $timestamp $tag: $msg"
         synchronized(lock) {
-            ring[index % RING_SIZE] = line
+            // index is a Long counter — no Int-overflow wraparound after 2^31
+            // log lines, which previously corrupted the ring position (AND-L1)
+            ring[(index % RING_SIZE).toInt()] = line
             index++
         }
     }
@@ -50,9 +54,9 @@ object Logger {
      */
     fun getLogs(): String {
         synchronized(lock) {
-            val count = minOf(index, RING_SIZE)
+            val count = minOf(index, RING_SIZE.toLong()).toInt()
             if (count == 0) return ""
-            val start = if (index >= RING_SIZE) index % RING_SIZE else 0
+            val start = if (index >= RING_SIZE) (index % RING_SIZE).toInt() else 0
             return (0 until count)
                 .map { ring[(start + it) % RING_SIZE] }
                 .joinToString("\n")
