@@ -228,6 +228,12 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectDevice(info: MidiDeviceInfo) {
+        // Spinner re-selection / adapter rebuilds can re-deliver the device
+        // that is already open — re-opening it would close and reopen the
+        // port for nothing (and drop a reconnect-cycle worth of events).
+        // Guard by stable device id, not Spinner timing (AND-A3).
+        val current = _uiState.value?.selectedDevice
+        if (current != null && current.id == info.id) return
         service?.midiReader?.openDevice(info)
         _uiState.value = _uiState.value?.copy(selectedDevice = info)
     }
