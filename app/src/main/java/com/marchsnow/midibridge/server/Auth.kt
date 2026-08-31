@@ -49,7 +49,9 @@ class Auth(
      * @param newPassword plaintext new password
      */
     fun setNewPassword(newPassword: String) {
-        require(newPassword.length >= MIN_PASSWORD_LEN) {
+        // 码点数口径（同 ViewModel 的校验，对齐 Go 的 rune count，AND-新N11）
+        val codePoints = newPassword.codePointCount(0, newPassword.length)
+        require(codePoints >= MIN_PASSWORD_LEN) {
             "Password must be at least $MIN_PASSWORD_LEN characters"
         }
         val newHash = BCrypt.withDefaults().hashToString(BCRYPT_COST, newPassword.toCharArray())

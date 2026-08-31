@@ -157,8 +157,13 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         // 2. Validate password length（仅在用户填写了新密码时才校验/修改）
+        //    口径与 Go 对齐：Go 用 rune count（unicode 码点数）；
+        //    Kotlin 的 String.length 是 UTF-16 代码单元数，对增补平面
+        //    字符（如 emoji，占 2 个 char）会多计——codePointCount 才是
+        //    码点数，与 len([]rune(s)) 语义一致 (AND-新N11)。
         val newPassword = edit.password
-        if (newPassword.isNotEmpty() && newPassword.length < Auth.MIN_PASSWORD_LEN) {
+        val passwordCodePoints = newPassword.codePointCount(0, newPassword.length)
+        if (newPassword.isNotEmpty() && passwordCodePoints < Auth.MIN_PASSWORD_LEN) {
             _uiEvent.value = UiEvent.ValidationError(
                 "password", "Password must be at least ${Auth.MIN_PASSWORD_LEN} characters"
             )
