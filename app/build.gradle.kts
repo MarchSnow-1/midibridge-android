@@ -44,6 +44,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        // Pure-JVM unit tests: android.util.Log etc. return defaults instead of
+        // throwing "not mocked" (needed by IpFilter logging in JVM tests)
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -68,4 +74,6 @@ dependencies {
     implementation("androidx.media:media:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+
+    testImplementation("junit:junit:4.13.2")
 }

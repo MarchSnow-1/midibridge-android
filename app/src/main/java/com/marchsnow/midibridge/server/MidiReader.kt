@@ -31,6 +31,12 @@ class MidiReader(private val context: Context) {
 
     private val midiManager = context.getSystemService(MidiManager::class.java)
 
+    /**
+     * Standard MIDI byte-stream state machine (message splitting, Running
+     * Status, realtime extraction, SysEx reassembly). See [MidiParser].
+     */
+    private val parser = MidiParser { warning -> Logger.w("MidiReader", warning) }
+
     // Buffer 256, DROP_OLDEST = non-blocking send (matches Go select-default pattern)
     private val _midiFlow = MutableSharedFlow<MidiEvent>(
         extraBufferCapacity = 256,
@@ -57,6 +63,7 @@ class MidiReader(private val context: Context) {
      * List all MIDI devices that have at least one output port (device → app).
      * Note: outputPortCount > 0 = device sends data TO the app.
      */
+    @Suppress("DEPRECATION") // MidiManager.devices deprecated in API 33; still the minSdk-23-compatible API
     fun getAvailableDevices(): List<MidiDeviceInfo> {
         return midiManager.devices.filter { it.outputPortCount > 0 }
     }
@@ -98,6 +105,8 @@ class MidiReader(private val context: Context) {
         runCatching { openDevice?.close() }
         openPort   = null
         openDevice = null
+        // Any partially assembled message from the old device is meaningless now
+        parser.reset()
         if (isConnected) {
             isConnected = false
             _disconnectFlow.tryEmit(Unit)
@@ -113,32 +122,33 @@ class MidiReader(private val context: Context) {
     /**
      * Create the MidiReceiver that the MIDI driver calls back on its own thread.
      *
-     * Critical: we must IMMEDIATELY copy the data array — the driver may reuse
-     * the buffer after the callback returns. This matches the Go version's
-     * "copy(msg, data)" inside the SetListener callback.
+     * IMPORTANT: Android's MidiReceiver delivers a raw MIDI *byte stream*,
+     * NOT USB-MIDI event packets. One callback may contain several
+     * concatenated messages, and a single message (SysEx) may be split
+     * across several callbacks. All splitting/reassembly is handled by
+     * [MidiParser] — there is deliberately no CIN-header stripping here
+     * (the old size==4 heuristic corrupted legitimate data).
      *
-     * We use tryEmit (non-blocking) to match the Go "select default" pattern.
+     * Each completed message is emitted via tryEmit (non-blocking, matches
+     * the Go "select default" pattern). MidiParser allocates a fresh array
+     * per message, so we never retain the driver's reusable buffer.
      */
     private fun createReceiver() = object : MidiReceiver() {
         override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
+            // Guard: zero/negative-length chunks carry no data
+            if (count <= 0) return
+
             val nowNs   = System.nanoTime()
-            val deltaMs = if (lastEventTimeNs == 0L) 0.0
+            var deltaMs = if (lastEventTimeNs == 0L) 0.0
                           else (nowNs - lastEventTimeNs) / 1_000_000.0
             lastEventTimeNs = nowNs
 
-            // Copy and strip USB-MIDI CIN header if present.
-            // Some Android USB-MIDI drivers deliver 4-byte USB-MIDI packets
-            // (Cable Number + CIN + 3 MIDI bytes). Valid MIDI messages are
-            // 1-3 bytes, or SysEx (starts with 0xF0). If we get 4 bytes that
-            // don't start with SysEx, strip the CIN header byte.
-            val rawData = msg.copyOfRange(offset, offset + count)
-            val data = if (rawData.size == 4 && rawData[0] != 0xF0.toByte()) {
-                rawData.copyOfRange(1, 4)
-            } else {
-                rawData
+            // The first message of the chunk carries the inter-arrival delta;
+            // subsequent messages in the same chunk share the timestamp.
+            parser.feed(msg, offset, count) { data ->
+                _midiFlow.tryEmit(MidiEvent(data, deltaMs))
+                deltaMs = 0.0
             }
-
-            _midiFlow.tryEmit(MidiEvent(data, deltaMs))
         }
     }
 }
