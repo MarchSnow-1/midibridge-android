@@ -20,6 +20,8 @@ import com.marchsnow.midibridge.server.WsServer
 import com.marchsnow.midibridge.ui.MainActivity
 import com.marchsnow.midibridge.util.Logger
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Foreground service that owns the lifecycle of all server modules.
@@ -37,6 +39,13 @@ import kotlinx.coroutines.*
  *  - 模块在 onCreate 中初始化为可空引用，startBridge 中按需创建，
  *    对外提供 null-safe 访问器——避免 lateinit 在进程重建早期的
  *    UninitializedPropertyAccessException 崩溃。
+ *
+ * 线程模型（AND-S3/V5）：
+ *  - startBridge/stopBridge/restartBridge 立即返回，耗时部分
+ *    （配置加载、WsServer.stop 的等待、bcrypt 等）在自有 IO scope 执行，
+ *    绝不阻塞主线程（旧实现从主线程同步调用会卡 UI 甚至 ANR）。
+ *  - startForeground 在公共入口同步先行调用——5 秒契约不等调度器。
+ *  - bridgeMutex 串行化 start/stop/restart，防并发交错竞态。
  */
 class MidiBridgeService : Service() {
 
@@ -54,6 +63,9 @@ class MidiBridgeService : Service() {
 
     private val binder = LocalBinder()
     private val scope  = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** 串行化 bridge 的启动/停止/重启，防止交错调用产生竞态 */
+    private val bridgeMutex = Mutex()
 
     // 模块引用：onCreate 置 null，startBridge 创建，stopBridge 清理。
     // 对外一律通过 null-safe 访问器，杜绝 lateinit 崩溃（AND-V2/S4）
@@ -85,7 +97,12 @@ class MidiBridgeService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startBridge()
-            ACTION_STOP  -> { stopBridge(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+            ACTION_STOP  -> scope.launch {
+                // 先完成清理，再退前台/自灭——保证停止动作不被中途销毁打断
+                bridgeMutex.withLock { stopBridgeInternal() }
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
             // START_STICKY 重建（进程被杀后系统重启）携带 null intent：
             // 按恢复处理——重新启动桥接业务，绝不能让服务空转
             null         -> {
@@ -99,7 +116,9 @@ class MidiBridgeService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
-        stopBridge()
+        // 正常路径下 bridge 已在 ACTION_STOP 中停止（此时秒回）；
+        // 系统直接销毁时做有界 best-effort 同步清理，随后取消 scope。
+        runBlocking { withTimeoutOrNull(1500) { bridgeMutex.withLock { stopBridgeInternal() } } }
         VideoKeepAlive.stop()
         scope.cancel()
         super.onDestroy()
@@ -107,13 +126,35 @@ class MidiBridgeService : Service() {
 
     // ─── Bridge start / stop / restart ───
 
-    /** Initialize all modules and start the WebSocket server. */
+    /**
+     * Initialize all modules and start the WebSocket server.
+     * Non-blocking: heavy work runs in the service IO scope (AND-S3/V5).
+     */
     fun startBridge() {
         // 前台化前置：必须在任何可能耗时/抛异常的初始化之前完成，
         // 保证 startForegroundService() 的 5 秒契约在所有路径上都被满足
-        //（含 ACTION_START 的"已在运行"早退分支——旋转屏幕会重复触发）
+        //（含 ACTION_START 的"已在运行"早退分支——旋转屏幕会重复触发）。
+        // 同步调用而非丢进协程——契约不应依赖调度器时序。
         startForeground(NOTIFICATION_ID, buildNotification("Starting..."))
+        scope.launch { bridgeMutex.withLock { startBridgeInternal() } }
+    }
 
+    /** Stop all services. Non-blocking (AND-S3/V5). Order: MidiReader → WsServer. */
+    fun stopBridge() {
+        scope.launch { bridgeMutex.withLock { stopBridgeInternal() } }
+    }
+
+    /** Restart the full stack — called by ViewModel after config save. Non-blocking. */
+    fun restartBridge() {
+        scope.launch {
+            bridgeMutex.withLock {
+                stopBridgeInternal()
+                startBridgeInternal()
+            }
+        }
+    }
+
+    private fun startBridgeInternal() {
         if (isRunning) {
             Logger.w(TAG, "Server already running")
             updateNotification("Running on port ${config?.ws?.port ?: 9001}")
@@ -156,8 +197,7 @@ class MidiBridgeService : Service() {
         Logger.i(TAG, "MIDIBridge started (WS port=${cfg.ws.port})")
     }
 
-    /** Stop all services. Order: MidiReader → WsServer. */
-    fun stopBridge() {
+    private fun stopBridgeInternal() {
         if (!isRunning) return
         midiReader?.release()
         wsServer?.stop()
@@ -167,12 +207,6 @@ class MidiBridgeService : Service() {
         Logger.i(TAG, "MIDIBridge stopped")
         // 服务保持前台但通知更新为已停止状态（不再显示"Running"误导用户）
         updateNotification("Stopped")
-    }
-
-    /** Restart the full stack — called by ViewModel after config save. */
-    fun restartBridge() {
-        stopBridge()
-        startBridge()
     }
 
     // ─── Notification ───

@@ -23,9 +23,11 @@ import com.marchsnow.midibridge.server.Auth
 import com.marchsnow.midibridge.service.MidiBridgeService
 import com.marchsnow.midibridge.service.VideoKeepAlive
 import com.marchsnow.midibridge.util.Logger
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.NetworkInterface
 
 // ─── UI state data classes ───
@@ -153,42 +155,50 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
         }
 
         viewModelScope.launch {
-            val configManager = ConfigManager(getApplication())
-            val currentConfig = configManager.load()
+            // bcrypt 哈希/校验、配置读写与重启都是耗时操作——移出主线程（AND-S3/V5）
+            withContext(Dispatchers.IO) {
+                val configManager = ConfigManager(getApplication())
+                val currentConfig = configManager.load()
 
-            // 3. 密码语义：留空 = 不修改密码；非空且与存储哈希不同 = 修改
-            val storedHash = currentConfig.auth.passwordHash
-            val passwordChanged = newPassword.isNotEmpty() && storedHash.isNotEmpty() &&
-                    !runCatching {
-                        BCrypt.verifyer()
-                            .verify(newPassword.toCharArray(), storedHash)
-                            .verified
-                    }.getOrDefault(false)
+                // 3. 密码语义：留空 = 不修改密码；非空且与存储哈希不同 = 修改
+                val storedHash = currentConfig.auth.passwordHash
+                val passwordChanged = newPassword.isNotEmpty() && storedHash.isNotEmpty() &&
+                        !runCatching {
+                            BCrypt.verifyer()
+                                .verify(newPassword.toCharArray(), storedHash)
+                                .verified
+                        }.getOrDefault(false)
 
-            // 首次设置密码（尚无存储哈希）也视为修改
-            val firstTimeSet = newPassword.isNotEmpty() && storedHash.isEmpty()
+                // 首次设置密码（尚无存储哈希）也视为修改
+                val firstTimeSet = newPassword.isNotEmpty() && storedHash.isEmpty()
 
-            if ((passwordChanged || firstTimeSet) && svc.isRunning) {
-                svc.wsServer?.kickAllClients(KickReason.PASSWORD_CHANGED)
-                Logger.i("ViewModel", "Password changed, all clients kicked")
+                if ((passwordChanged || firstTimeSet) && svc.isRunning) {
+                    svc.wsServer?.kickAllClients(KickReason.PASSWORD_CHANGED)
+                    Logger.i("ViewModel", "Password changed, all clients kicked")
+                }
+
+                // 4. Build new config and persist
+                val newConfig = currentConfig.copy(
+                    ws = WsConfig(port = port, allowedIPs = edit.allowedIPs.trim()),
+                    auth = currentConfig.auth,
+                    logging = LoggingConfig(midiVerbose = edit.midiVerbose)
+                )
+
+                // 仅在用户填写了密码时才重新哈希并持久化；
+                // 留空则保留存储的哈希——密码绝不会被静默重置。
+                // 无论是否修改密码，ws/logging 的变更都必须落盘
+                //（49036b5 把保存收进密码分支后，仅改端口保存会被静默丢弃）
+                if (newPassword.isNotEmpty()) {
+                    val tempAuth = Auth(newConfig, configManager)
+                    tempAuth.setNewPassword(newPassword)
+                } else {
+                    configManager.save(newConfig)
+                }
+
+                // 5. Restart service (re-loads config from SharedPreferences).
+                //    restartBridge 本身异步（Service IO scope），不再阻塞此协程
+                svc.restartBridge()
             }
-
-            // 4. Build new config and persist
-            val newConfig = currentConfig.copy(
-                ws = WsConfig(port = port, allowedIPs = edit.allowedIPs.trim()),
-                auth = currentConfig.auth,
-                logging = LoggingConfig(midiVerbose = edit.midiVerbose)
-            )
-
-            // 仅在用户填写了密码时才重新哈希并持久化；
-            // 留空则保留存储的哈希——密码绝不会被静默重置
-            if (newPassword.isNotEmpty()) {
-                val tempAuth = Auth(newConfig, configManager)
-                tempAuth.setNewPassword(newPassword)
-            }
-
-            // 5. Restart service (re-loads config from SharedPreferences)
-            svc.restartBridge()
 
             // 6. Reset edit state（保存后清空密码框，防止下次保存意外复用）
             _configEdit.postValue(edit.copy(password = "", hasUnsavedChanges = false))
