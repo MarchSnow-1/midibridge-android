@@ -92,6 +92,8 @@ class MidiBridgeService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Re-apply the user's persisted keep-alive preference (AND-V1')
+        VideoKeepAlive.restoreIfDesired(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

@@ -253,11 +253,22 @@ class MidiBridgeViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleVideoKeepAlive(enabled: Boolean) {
         if (enabled) {
-            VideoKeepAlive.start(getApplication())
+            // start() can fail on some devices — surface it instead of
+            // silently ignoring the result (AND-V1')
+            val ok = VideoKeepAlive.start(getApplication())
+            if (!ok) {
+                VideoKeepAlive.persistDesired(getApplication(), false)
+                _uiEvent.value = UiEvent.ShowToast("Keep-alive unavailable on this device")
+                _uiState.value = _uiState.value?.copy(keepAliveOn = false)
+                return
+            }
+            VideoKeepAlive.persistDesired(getApplication(), true)
+            _uiState.value = _uiState.value?.copy(keepAliveOn = true)
         } else {
             VideoKeepAlive.stop()
+            VideoKeepAlive.persistDesired(getApplication(), false)
+            _uiState.value = _uiState.value?.copy(keepAliveOn = false)
         }
-        _uiState.value = _uiState.value?.copy(keepAliveOn = enabled)
     }
 
     // ─── Init & polling ───
